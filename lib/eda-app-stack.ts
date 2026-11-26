@@ -103,6 +103,22 @@ export class EDAAppStack extends cdk.Stack {
       }
     );
 
+    //Metadata lambda function
+    const addMetadataFn = new lambdanode.NodejsFunction(
+      this,
+      "addMetadataFn",
+      {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: `${__dirname}/../lambdas/addImageMetadata.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 128,
+        environment: {
+          TABLE_NAME: imagesTable.tableName,
+        },
+      }
+    );
+
+
     // S3 --> SQS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
@@ -128,14 +144,64 @@ export class EDAAppStack extends cdk.Stack {
       maxBatchingWindow: cdk.Duration.seconds(10),
     });
 
-    // triggers
+    // triggers/subscriptions
+    //subscriptions updated with filters -using body filter 
 
     newImageTopic.addSubscription(
-      new subs.SqsSubscription(imageProcessQueue)
+      new subs.SqsSubscription(imageProcessQueue, {
+        filterPolicyWithMessageBody: {
+          Records: sns.FilterOrPolicy.policy({
+            s3: sns.FilterOrPolicy.policy({
+              object: sns.FilterOrPolicy.policy({
+                key: sns.FilterOrPolicy.filter(
+                  sns.SubscriptionFilter.stringFilter({
+                    matchSuffixes: [".jpeg", ".jpg", ".png"],
+                  })
+                ),
+              }),
+            }),
+          }),
+        },
+      })
     );
 
+
     //Second queue subscribe to SNS topic
-    newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
+    newImageTopic.addSubscription(
+      new subs.SqsSubscription(mailerQ, {
+        filterPolicyWithMessageBody: {
+          Records: sns.FilterOrPolicy.policy({
+            s3: sns.FilterOrPolicy.policy({
+              object: sns.FilterOrPolicy.policy({
+                key: sns.FilterOrPolicy.filter(
+                  sns.SubscriptionFilter.stringFilter({
+                    matchSuffixes: [".jpeg", ".jpg", ".png"],
+                  })
+                ),
+              }),
+            }),
+          }),
+        },
+      })
+    );
+
+
+    newImageTopic.addSubscription(
+      new subs.LambdaSubscription(addMetadataFn, {
+        filterPolicy: {
+          metadata_type: sns.SubscriptionFilter.stringFilter({
+            allowlist: ["Caption", "Date", "Photographer"],
+          }),
+        },
+      })
+    );
+
+    // ARN output in console
+    new cdk.CfnOutput(this, "SNS Topic ARN", {
+      value: newImageTopic.topicArn,
+    });
+
+
 
 
     // Event Sources
@@ -154,6 +220,8 @@ export class EDAAppStack extends cdk.Stack {
 
     imagesBucket.grantRead(persistImageDataFn);
     imagesTable.grantReadWriteData(persistImageDataFn);
+    imagesTable.grantReadWriteData(addMetadataFn);
+
 
     // Permission to send emails using the SES service
 
