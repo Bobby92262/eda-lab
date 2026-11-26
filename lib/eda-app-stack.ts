@@ -31,8 +31,17 @@ export class EDAAppStack extends cdk.Stack {
 
     // Integration infrastructure
 
+    // Dead letter Queue
+    const dlq = new sqs.Queue(this, "img-dlq", {
+      receiveMessageWaitTime: cdk.Duration.seconds(6),
+    });
+
     const imageProcessQueue = new sqs.Queue(this, "img-process-q", {
       receiveMessageWaitTime: cdk.Duration.seconds(6),
+      deadLetterQueue: {
+        queue: dlq,
+        maxReceiveCount: 1,
+      },
     });
 
     // Second Queue
@@ -52,6 +61,8 @@ export class EDAAppStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       tableName: "Images",
     });
+
+    
 
 
     // Lambda functions
@@ -80,6 +91,17 @@ export class EDAAppStack extends cdk.Stack {
       entry: `${__dirname}/../lambdas/mailer.ts`,
     });
 
+    // Process message in DLQ
+    const rejectedFileFn = new lambdanode.NodejsFunction(
+      this,
+      "RejectedFileFn",
+      {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: `${__dirname}/../lambdas/rejectedFile.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 128,
+      }
+    );
 
     // S3 --> SQS
     imagesBucket.addEventNotification(
@@ -99,6 +121,13 @@ export class EDAAppStack extends cdk.Stack {
       maxBatchingWindow: cdk.Duration.seconds(5),
     });
 
+    // DLQ an event source
+    const rejectedFileEventSource = new events.SqsEventSource(dlq, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(10),
+    });
+
+    // triggers
 
     newImageTopic.addSubscription(
       new subs.SqsSubscription(imageProcessQueue)
@@ -108,12 +137,16 @@ export class EDAAppStack extends cdk.Stack {
     newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
 
 
-
     // Event Sources
 
+    // DynamoDB image persistence event calling 
     persistImageDataFn.addEventSource(newImageEventSource);
 
+    // For emailing the associated email address
     mailerFn.addEventSource(newImageMailEventSource);
+
+    // Trigger for DLQ rejectedFileFn
+    rejectedFileFn.addEventSource(rejectedFileEventSource);
 
 
     // Permissions
